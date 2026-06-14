@@ -3,7 +3,7 @@
 //  キャッシュ戦略: Cache-First (オフライン対応)
 // =====================================================
 
-const CACHE_NAME = "pump-simulator-v1";
+const CACHE_NAME = "pump-simulator-v2";
 
 // キャッシュするリソース
 const PRECACHE_URLS = [
@@ -11,8 +11,8 @@ const PRECACHE_URLS = [
   "./manifest.json",
   "https://unpkg.com/react@18/umd/react.production.min.js",
   "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
+  "https://unpkg.com/prop-types@15.8.1/prop-types.min.js",
   "https://unpkg.com/recharts@2.12.7/umd/Recharts.js",
-  "https://unpkg.com/@babel/standalone@7.24.4/babel.min.js",
 ];
 
 // ─── インストール: 全リソースをキャッシュ ────────────
