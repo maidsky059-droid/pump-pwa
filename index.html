@@ -1,0 +1,1525 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="ポンプ学習" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>遠心ポンプ シミュレータ</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #0f172a; }
+    body { overscroll-behavior: none; -webkit-overflow-scrolling: touch; }
+    input[type=range] { -webkit-appearance: none; appearance: none; height: 6px; cursor: pointer; }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 22px; height: 22px; border-radius: 50%;
+      background: #3b82f6; cursor: pointer;
+    }
+    #root { padding-bottom: env(safe-area-inset-bottom, 16px); }
+    ::-webkit-scrollbar { display: none; }
+    #loading {
+      position: fixed; inset: 0; background: #0f172a;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: #60a5fa; font-family: sans-serif; z-index: 9999; gap: 16px;
+    }
+    .spinner {
+      width: 48px; height: 48px; border: 4px solid #1e3a8a;
+      border-top-color: #3b82f6; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #err-box {
+      display: none; background: #450a0a; border: 1px solid #ef4444;
+      border-radius: 8px; padding: 16px; max-width: 90vw;
+      color: #fca5a5; font-size: 12px; word-break: break-all;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <div id="load-msg">ライブラリを読み込み中...</div>
+    <div id="err-box"></div>
+  </div>
+  <div id="root"></div>
+
+  <script>
+    function showError(msg) {
+      document.getElementById("load-msg").textContent = "エラーが発生しました";
+      var b = document.getElementById("err-box");
+      b.style.display = "block";
+      b.textContent = String(msg);
+    }
+    window.onerror = function(msg, src, line, col, err) {
+      showError((err ? err.message : msg) + "\n行:" + line);
+    };
+  </script>
+
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"
+          onerror="showError('React の読み込み失敗')"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"
+          onerror="showError('ReactDOM の読み込み失敗')"></script>
+  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"
+          onerror="showError('Recharts の読み込み失敗')"></script>
+
+  <script>
+    document.getElementById("load-msg").textContent = "アプリを起動中...";
+    if (typeof Recharts === "undefined") {
+      var keys = Object.keys(window).filter(function(k){ return /recharts/i.test(k); });
+      if (keys.length) { window.Recharts = window[keys[0]]; }
+    }
+  </script>
+
+  <script>
+    try {
+const {
+  useState,
+  useMemo,
+  useEffect
+} = React;
+const {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ReferenceDot,
+  ResponsiveContainer
+} = Recharts;
+const G = 9.81;
+const PIPE_D = 0.05;
+const PIPE_A = Math.PI * (PIPE_D / 2) ** 2;
+const NU = 1e-6;
+const ATMO_NPSH = 10.08;
+const DARCY_F = 0.022;
+const FITTINGS = [{
+  id: "p1m",
+  cat: "pipe",
+  name: "直管 1m",
+  icon: "━",
+  length: 1
+}, {
+  id: "p5m",
+  cat: "pipe",
+  name: "直管 5m",
+  icon: "━━━",
+  length: 5
+}, {
+  id: "p10m",
+  cat: "pipe",
+  name: "直管 10m",
+  icon: "━━━━━",
+  length: 10
+}, {
+  id: "eb90",
+  cat: "fitting",
+  name: "90°エルボ",
+  icon: "↩",
+  k: 0.9
+}, {
+  id: "eb45",
+  cat: "fitting",
+  name: "45°エルボ",
+  icon: "↗",
+  k: 0.4
+}, {
+  id: "gv_o",
+  cat: "valve",
+  name: "仕切弁（全開）",
+  icon: "⊣",
+  k: 0.2
+}, {
+  id: "gv_h",
+  cat: "valve",
+  name: "仕切弁（半開）",
+  icon: "⊢",
+  k: 5.6
+}, {
+  id: "glv",
+  cat: "valve",
+  name: "玉形弁",
+  icon: "⊕",
+  k: 10.0
+}, {
+  id: "bv",
+  cat: "valve",
+  name: "ボール弁（全開）",
+  icon: "◎",
+  k: 0.1
+}, {
+  id: "cv",
+  cat: "valve",
+  name: "逆止弁",
+  icon: "▷",
+  k: 2.0
+}, {
+  id: "tee",
+  cat: "fitting",
+  name: "T字管（直通）",
+  icon: "┬",
+  k: 0.4
+}, {
+  id: "red",
+  cat: "fitting",
+  name: "レジューサ",
+  icon: "◁",
+  k: 0.5
+}];
+const getColors = c => {
+  if (c.cat === "pipe") return {
+    bg: "#0c2543",
+    border: "#3b82f6",
+    kLabel: "#64748b"
+  };
+  if (c.cat === "fitting") return {
+    bg: "#0d2b1e",
+    border: "#22c55e",
+    kLabel: "#4ade80"
+  };
+  const k = c.k || 0;
+  return k > 5 ? {
+    bg: "#450a0a",
+    border: "#ef4444",
+    kLabel: "#f87171"
+  } : k > 1 ? {
+    bg: "#3c1a04",
+    border: "#f59e0b",
+    kLabel: "#fbbf24"
+  } : {
+    bg: "#052e16",
+    border: "#22c55e",
+    kLabel: "#4ade80"
+  };
+};
+let _uid = 1;
+const uid = () => _uid++;
+const CHARA_IMAGES = {
+  ok: "char_ok.png",
+  cavitation: "char_cavitation.png",
+  noflow: "char_noflow.png",
+  highvel: "char_highvel.png"
+};
+const CharacterAvatar = ({
+  mood = "ok"
+}) => {
+  const src = CHARA_IMAGES[mood] || CHARA_IMAGES.ok;
+  return React.createElement("img", {
+    src: src,
+    alt: "character",
+    style: {
+      display: "block",
+      width: "100%",
+      height: "auto",
+      objectFit: "contain"
+    }
+  });
+};
+const StatusPanel = ({
+  canFlow,
+  npshOk,
+  velOk,
+  vel,
+  pumpHso
+}) => {
+  const mood = !canFlow ? "noflow" : !npshOk ? "cavitation" : !velOk ? "highvel" : "ok";
+  const info = {
+    ok: {
+      bg: "#0d2f1a",
+      bdr: "#22c55e",
+      titleColor: "#4ade80",
+      title: "正常運転",
+      lines: ["流体は正常に流れている。", "NPSHa・流速ともに許容範囲内。", "このまま運転を続けていい。"]
+    },
+    cavitation: {
+      bg: "#2d1a00",
+      bdr: "#f59e0b",
+      titleColor: "#fbbf24",
+      title: "キャビテーション発生の危険",
+      lines: ["NPSHa < NPSHr — 吸込み条件が不足している。", "吸込み揚程を小さくするか、", "吸込み配管の抵抗を下げることを勧める。"]
+    },
+    noflow: {
+      bg: "#2d0a0a",
+      bdr: "#ef4444",
+      titleColor: "#f87171",
+      title: "流体は流れない",
+      lines: [`静揚程がポンプの閉め切り揚程(${pumpHso} m)を超えている。`, "静揚程を下げるか、", "より高揚程のポンプを選定する必要がある。"]
+    },
+    highvel: {
+      bg: "#2a1a00",
+      bdr: "#eab308",
+      titleColor: "#fde047",
+      title: "流速超過",
+      lines: [`現在の流速 ${vel.toFixed(2)} m/s — 推奨上限は 3 m/s。`, "配管径を拡大するか、", "流量を抑えることで改善できる。"]
+    }
+  };
+  const d = info[mood];
+  return React.createElement("div", {
+    style: {
+      background: d.bg,
+      border: `1.5px solid ${d.bdr}`,
+      borderRadius: 10,
+      marginBottom: 14,
+      display: "flex",
+      alignItems: "center",
+      gap: 0,
+      overflow: "hidden"
+    }
+  }, React.createElement("div", {
+    style: {
+      flex: 1,
+      padding: "14px 0 14px 16px",
+      alignSelf: "flex-start",
+      minWidth: 240
+    }
+  }, React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: "bold",
+      color: d.titleColor,
+      marginBottom: 6
+    }
+  }, mood === "ok" && "✅ ", mood === "cavitation" && "⚠️ ", mood === "noflow" && "❌ ", mood === "highvel" && "⚡ ", d.title), d.lines.map((line, i) => React.createElement("div", {
+    key: i,
+    style: {
+      fontSize: 11.5,
+      color: "#cbd5e1",
+      lineHeight: 1.7
+    }
+  }, i === 0 ? "› " : "　", line))), React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      flexShrink: 0
+    }
+  }, React.createElement("div", {
+    style: {
+      position: "relative"
+    }
+  }, React.createElement("div", {
+    style: {
+      background: "#1e293b",
+      border: `1.5px solid ${d.bdr}`,
+      borderRadius: 12,
+      padding: "10px 14px",
+      fontSize: 13,
+      color: "#e2e8f0",
+      maxWidth: 160,
+      lineHeight: 1.8,
+      textAlign: "center"
+    }
+  }, mood === "ok" && React.createElement(React.Fragment, null, "\u554F\u984C\u306A\u3044\u3002", React.createElement("br", null), "\u6D41\u4F53\u306F\u6B63\u5E38\u306B", React.createElement("br", null), "\u6D41\u308C\u3066\u3044\u308B\u3002"), mood === "cavitation" && React.createElement(React.Fragment, null, "\u2026\u307E\u305A\u3044\u3002", React.createElement("br", null), "\u30AD\u30E3\u30D3\u30C6\u30FC\u30B7\u30E7\u30F3", React.createElement("br", null), "\u304C\u767A\u751F\u3057\u3066\u3044\u308B\u3002", React.createElement("br", null), "\u5438\u8FBC\u307F\u6761\u4EF6\u3092", React.createElement("br", null), "\u898B\u76F4\u3059\u3079\u304D\u3060\u3002"), mood === "noflow" && React.createElement(React.Fragment, null, "\u2026\u6D41\u308C\u306A\u3044\u3002", React.createElement("br", null), "\u30DD\u30F3\u30D7\u63DA\u7A0B\u304C", React.createElement("br", null), "\u4E0D\u8DB3\u3057\u3066\u3044\u308B\u3002"), mood === "highvel" && React.createElement(React.Fragment, null, "\u6D41\u901F\u8D85\u904E\u3060\u3002", React.createElement("br", null), "3 m/s\u3092\u8D85\u3048\u308B\u3068", React.createElement("br", null), "\u914D\u7BA1\u304C\u5371\u967A\u306B\u306A\u308B\u3002")), React.createElement("div", {
+    style: {
+      position: "absolute",
+      right: -11,
+      top: "50%",
+      transform: "translateY(-50%)",
+      width: 0,
+      height: 0,
+      borderTop: "10px solid transparent",
+      borderBottom: "10px solid transparent",
+      borderLeft: `11px solid ${d.bdr}`
+    }
+  }), React.createElement("div", {
+    style: {
+      position: "absolute",
+      right: -9,
+      top: "50%",
+      transform: "translateY(-50%)",
+      width: 0,
+      height: 0,
+      borderTop: "8px solid transparent",
+      borderBottom: "8px solid transparent",
+      borderLeft: "9px solid #1e293b"
+    }
+  })), React.createElement("div", {
+    style: {
+      width: 280,
+      flexShrink: 0
+    }
+  }, React.createElement(CharacterAvatar, {
+    mood: mood
+  }))));
+};
+function PumpSimulator() {
+  const [isMobile, setIsMobile] = useState(typeof window !== "undefined" && window.innerWidth < 768);
+  useEffect(() => {
+    const fn = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener("resize", fn);
+    return () => window.removeEventListener("resize", fn);
+  }, []);
+  const [pumpHso, setPumpHso] = useState(35);
+  const [pumpHmax, setPumpHmax] = useState(5);
+  const [pumpQmax, setPumpQmax] = useState(22);
+  const [etaMax, setEtaMax] = useState(72);
+  const [pumpBepQ, setPumpBepQ] = useState(12);
+  const [npshR0, setNpshR0] = useState(1.0);
+  const [npshRmid, setNpshRmid] = useState(2.0);
+  const [npshRmax, setNpshRmax] = useState(4.0);
+  const [staticHead, setStaticHead] = useState(10);
+  const [suctionLift, setSuctionLift] = useState(3);
+  const [pipeline, setPipeline] = useState(() => [{
+    uid: uid(),
+    id: "p5m",
+    cat: "pipe",
+    name: "直管 5m",
+    length: 5
+  }, {
+    uid: uid(),
+    id: "eb90",
+    cat: "fitting",
+    name: "90°エルボ",
+    k: 0.9
+  }, {
+    uid: uid(),
+    id: "gv_o",
+    cat: "valve",
+    name: "仕切弁（全開）",
+    k: 0.2
+  }, {
+    uid: uid(),
+    id: "p5m",
+    cat: "pipe",
+    name: "直管 5m",
+    length: 5
+  }]);
+  const pumpB = (pumpHso - pumpHmax) * 3600 ** 2 / pumpQmax ** 2;
+  const pumpHead = Q => Math.max(0, pumpHso - pumpB * (Q / 3600) ** 2);
+  const pumpNpshR = Q => {
+    const q0 = 0,
+      q1 = pumpQmax / 2,
+      q2 = pumpQmax;
+    const n0 = npshR0,
+      n1 = npshRmid,
+      n2 = npshRmax;
+    const L0 = (Q - q1) * (Q - q2) / ((q0 - q1) * (q0 - q2));
+    const L1 = (Q - q0) * (Q - q2) / ((q1 - q0) * (q1 - q2));
+    const L2 = (Q - q0) * (Q - q1) / ((q2 - q0) * (q2 - q1));
+    return Math.max(0, n0 * L0 + n1 * L1 + n2 * L2);
+  };
+  const pumpEff = Q => {
+    if (Q <= 0) return 0;
+    const r = Q / pumpBepQ;
+    return Math.max(0, etaMax / 100 * r * Math.exp(1 - r));
+  };
+  const {
+    sumK,
+    sumL
+  } = useMemo(() => {
+    let sumK = 0,
+      sumL = 0;
+    for (const c of pipeline) {
+      if (c.cat === "pipe") sumL += c.length;else sumK += c.k;
+    }
+    return {
+      sumK,
+      sumL
+    };
+  }, [pipeline]);
+  const sysR = useMemo(() => {
+    const K = sumK + DARCY_F * sumL / PIPE_D;
+    return K / (2 * G * PIPE_A ** 2 * 3600 ** 2);
+  }, [sumK, sumL]);
+  const op = useMemo(() => {
+    const pB = pumpB / 3600 ** 2;
+    const dH = pumpHso - staticHead;
+    if (dH <= 0) return null;
+    const Q2 = dH / (pB + sysR);
+    if (Q2 <= 0) return null;
+    const Q = Math.sqrt(Q2);
+    const H = pumpHead(Q);
+    if (H <= 0 || Q > pumpQmax * 1.05) return null;
+    return {
+      Q: +Q.toFixed(2),
+      H: +H.toFixed(1)
+    };
+  }, [pumpHso, pumpHmax, pumpB, pumpQmax, staticHead, sysR]);
+  const vel = op ? op.Q / 3600 / PIPE_A : 0;
+  const Re = vel * PIPE_D / NU;
+  const npshA = useMemo(() => {
+    if (!op) return null;
+    return +(ATMO_NPSH - suctionLift - sysR * 0.3 * op.Q ** 2).toFixed(2);
+  }, [op, suctionLift, sysR]);
+  const npshR = op ? +pumpNpshR(op.Q).toFixed(2) : null;
+  const eta = op ? pumpEff(op.Q) : 0;
+  const power = op && eta > 0 ? +(1000 * G * (op.Q / 3600) * op.H / eta / 1000).toFixed(2) : 0;
+  const chartXMax = Math.ceil(pumpQmax * 1.15);
+  const chartHMax = Math.ceil(pumpHso * 1.12 / 5) * 5;
+  const chartData = useMemo(() => {
+    const pts = [];
+    const step = chartXMax / 96;
+    for (let Q = 0; Q <= chartXMax; Q += step) {
+      const pH = +pumpHead(Q).toFixed(2);
+      const sys = +(staticHead + sysR * Q * Q).toFixed(2);
+      const nR = +pumpNpshR(Q).toFixed(2);
+      const nA = +(ATMO_NPSH - suctionLift - sysR * 0.3 * Q * Q).toFixed(2);
+      pts.push({
+        Q: +Q.toFixed(2),
+        pump: pH > 0 ? pH : 0,
+        sys: sys < chartHMax ? sys : null,
+        npshR: nR,
+        npshA: nA > 0 ? nA : 0,
+        eff: +(pumpEff(Q) * 100).toFixed(1)
+      });
+    }
+    return pts;
+  }, [pumpHso, pumpHmax, pumpB, pumpQmax, pumpBepQ, etaMax, staticHead, sysR, suctionLift, npshR0, npshRmid, npshRmax, chartXMax, chartHMax]);
+  const addComp = fid => {
+    const d = FITTINGS.find(f => f.id === fid);
+    if (!d) return;
+    setPipeline(p => [...p, {
+      uid: uid(),
+      id: d.id,
+      cat: d.cat,
+      name: d.name,
+      ...(d.cat === "pipe" ? {
+        length: d.length
+      } : {
+        k: d.k
+      })
+    }]);
+  };
+  const removeComp = u => setPipeline(p => p.filter(c => c.uid !== u));
+  const clearAll = () => setPipeline([]);
+  const npshOk = npshA !== null && npshR !== null && npshA >= npshR;
+  const canFlow = op !== null;
+  const velOk = vel <= 3;
+  const ChartTip = ({
+    active,
+    payload,
+    label
+  }) => {
+    if (!active || !payload?.length) return null;
+    return React.createElement("div", {
+      style: {
+        background: "#1e293b",
+        border: "1px solid #475569",
+        borderRadius: 6,
+        padding: "8px 12px",
+        fontSize: 11
+      }
+    }, React.createElement("div", {
+      style: {
+        fontWeight: "bold",
+        color: "#cbd5e1",
+        marginBottom: 4
+      }
+    }, "Q =", label, "m\xB3/h"), payload.map((p, i) => p.value != null && React.createElement("div", {
+      key: i,
+      style: {
+        color: p.color
+      }
+    }, p.name, ":", typeof p.value === "number" ? p.value.toFixed(2) : p.value)));
+  };
+  const card = {
+    background: "#1e293b",
+    borderRadius: 8,
+    padding: 14,
+    marginBottom: 12
+  };
+  const htitle = c => ({
+    margin: "0 0 10px",
+    fontSize: 13,
+    fontWeight: "bold",
+    color: c || "#7dd3fc"
+  });
+  const mBox = {
+    background: "#0f172a",
+    borderRadius: 6,
+    padding: "8px 6px",
+    textAlign: "center"
+  };
+  const Slider = ({
+    label,
+    value,
+    min,
+    max,
+    step = 1,
+    onChange,
+    color,
+    unit,
+    sub
+  }) => React.createElement("div", null, React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      marginBottom: 2
+    }
+  }, React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: "#94a3b8"
+    }
+  }, label), sub && React.createElement("span", {
+    style: {
+      fontSize: 10,
+      color: "#475569"
+    }
+  }, sub)), React.createElement("div", {
+    style: {
+      fontSize: 21,
+      fontWeight: "bold",
+      color
+    }
+  }, value, React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: "#475569"
+    }
+  }, unit)), React.createElement("input", {
+    type: "range",
+    min: min,
+    max: max,
+    step: step,
+    value: value,
+    onChange: e => onChange(+e.target.value),
+    style: {
+      width: "100%",
+      accentColor: color,
+      cursor: "pointer"
+    }
+  }), React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 10,
+      color: "#334155"
+    }
+  }, React.createElement("span", null, min, unit), React.createElement("span", null, max, unit)));
+  return React.createElement("div", {
+    style: {
+      fontFamily: "'Segoe UI','Hiragino Sans',sans-serif",
+      background: "#0f172a",
+      color: "#e2e8f0",
+      minHeight: "100vh",
+      padding: 16,
+      boxSizing: "border-box"
+    }
+  }, React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 12
+    }
+  }, React.createElement("h1", {
+    style: {
+      margin: 0,
+      fontSize: 21,
+      color: "#38bdf8",
+      fontWeight: "bold"
+    }
+  }, "\uD83C\uDF00 \u9060\u5FC3\u6E26\u5DFB\u304D\u30DD\u30F3\u30D7 \u30B7\u30DF\u30E5\u30EC\u30FC\u30BF\u30FC"), React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      fontSize: 12,
+      color: "#475569"
+    }
+  }, "\u30DD\u30F3\u30D7\u7279\u6027 & \u914D\u7BA1\u3092\u81EA\u7531\u306B\u5909\u3048\u3066\u3001\u30EA\u30A2\u30EB\u30BF\u30A4\u30E0\u3067\u6319\u52D5\u3092\u4F53\u9A13\u3057\u3088\u3046\uFF01")), React.createElement(StatusPanel, {
+    canFlow: canFlow,
+    npshOk: npshOk,
+    velOk: velOk,
+    vel: vel,
+    pumpHso: pumpHso
+  }), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+      gap: 14,
+      alignItems: "start"
+    }
+  }, React.createElement("div", null, React.createElement("div", {
+    style: card
+  }, React.createElement("h3", {
+    style: htitle("#7dd3fc")
+  }, "\uD83D\uDCCA H-Q\u66F2\u7DDA & \u30B7\u30B9\u30C6\u30E0\u66F2\u7DDA"), React.createElement(ResponsiveContainer, {
+    width: "100%",
+    height: 215
+  }, React.createElement(LineChart, {
+    data: chartData,
+    margin: {
+      top: 5,
+      right: 20,
+      left: 0,
+      bottom: 22
+    }
+  }, React.createElement(CartesianGrid, {
+    strokeDasharray: "3 3",
+    stroke: "#1e3a5f"
+  }), React.createElement(XAxis, {
+    dataKey: "Q",
+    tick: {
+      fill: "#64748b",
+      fontSize: 10
+    },
+    label: {
+      value: "流量 Q (m³/h)",
+      position: "insideBottom",
+      offset: -12,
+      fill: "#64748b",
+      fontSize: 11
+    }
+  }), React.createElement(YAxis, {
+    tick: {
+      fill: "#64748b",
+      fontSize: 10
+    },
+    domain: [0, chartHMax],
+    label: {
+      value: "全揚程 H (m)",
+      angle: -90,
+      position: "insideLeft",
+      offset: 10,
+      fill: "#64748b",
+      fontSize: 11
+    }
+  }), React.createElement(Tooltip, {
+    content: React.createElement(ChartTip, null)
+  }), React.createElement(Legend, {
+    wrapperStyle: {
+      fontSize: 11,
+      color: "#94a3b8"
+    }
+  }), React.createElement(Line, {
+    type: "monotone",
+    dataKey: "pump",
+    name: "ポンプ曲線",
+    stroke: "#38bdf8",
+    strokeWidth: 2.5,
+    dot: false
+  }), React.createElement(Line, {
+    type: "monotone",
+    dataKey: "sys",
+    name: "システム曲線",
+    stroke: "#fb923c",
+    strokeWidth: 2.5,
+    dot: false
+  }), op && React.createElement(ReferenceDot, {
+    x: op.Q,
+    y: op.H,
+    r: 8,
+    fill: "#facc15",
+    stroke: "#fff",
+    strokeWidth: 2,
+    label: {
+      value: "OP",
+      position: "top",
+      fill: "#facc15",
+      fontSize: 11,
+      fontWeight: "bold"
+    }
+  })))), React.createElement("div", {
+    style: card
+  }, React.createElement("h3", {
+    style: htitle("#c084fc")
+  }, "\uD83D\uDCA7 NPSH\u66F2\u7DDA\uFF08\u30AD\u30E3\u30D3\u30C6\u30FC\u30B7\u30E7\u30F3\u5224\u5B9A\uFF09"), React.createElement(ResponsiveContainer, {
+    width: "100%",
+    height: 148
+  }, React.createElement(LineChart, {
+    data: chartData,
+    margin: {
+      top: 5,
+      right: 20,
+      left: 0,
+      bottom: 22
+    }
+  }, React.createElement(CartesianGrid, {
+    strokeDasharray: "3 3",
+    stroke: "#1e3a5f"
+  }), React.createElement(XAxis, {
+    dataKey: "Q",
+    tick: {
+      fill: "#64748b",
+      fontSize: 10
+    },
+    label: {
+      value: "流量 Q (m³/h)",
+      position: "insideBottom",
+      offset: -12,
+      fill: "#64748b",
+      fontSize: 11
+    }
+  }), React.createElement(YAxis, {
+    tick: {
+      fill: "#64748b",
+      fontSize: 10
+    },
+    domain: [0, 12]
+  }), React.createElement(Tooltip, {
+    content: React.createElement(ChartTip, null)
+  }), React.createElement(Legend, {
+    wrapperStyle: {
+      fontSize: 11
+    }
+  }), React.createElement(Line, {
+    type: "monotone",
+    dataKey: "npshR",
+    name: "NPSHr 必要値",
+    stroke: "#f87171",
+    strokeWidth: 2,
+    dot: false,
+    strokeDasharray: "6 3"
+  }), React.createElement(Line, {
+    type: "monotone",
+    dataKey: "npshA",
+    name: "NPSHa 有効値",
+    stroke: "#4ade80",
+    strokeWidth: 2,
+    dot: false
+  }), op && npshA !== null && React.createElement(ReferenceDot, {
+    x: op.Q,
+    y: npshA,
+    r: 7,
+    fill: npshOk ? "#4ade80" : "#ef4444",
+    stroke: "#fff",
+    strokeWidth: 2
+  })))), React.createElement("div", {
+    style: card
+  }, React.createElement("h3", {
+    style: htitle("#fbbf24")
+  }, "\u26A1 \u52B9\u7387\u66F2\u7DDA \u03B7-Q"), React.createElement(ResponsiveContainer, {
+    width: "100%",
+    height: 122
+  }, React.createElement(LineChart, {
+    data: chartData,
+    margin: {
+      top: 5,
+      right: 20,
+      left: 0,
+      bottom: 22
+    }
+  }, React.createElement(CartesianGrid, {
+    strokeDasharray: "3 3",
+    stroke: "#1e3a5f"
+  }), React.createElement(XAxis, {
+    dataKey: "Q",
+    tick: {
+      fill: "#64748b",
+      fontSize: 10
+    },
+    label: {
+      value: "流量 Q (m³/h)",
+      position: "insideBottom",
+      offset: -12,
+      fill: "#64748b",
+      fontSize: 11
+    }
+  }), React.createElement(YAxis, {
+    tick: {
+      fill: "#64748b",
+      fontSize: 10
+    },
+    domain: [0, 90]
+  }), React.createElement(Tooltip, {
+    content: React.createElement(ChartTip, null)
+  }), React.createElement(Line, {
+    type: "monotone",
+    dataKey: "eff",
+    name: "効率 η (%)",
+    stroke: "#fbbf24",
+    strokeWidth: 2,
+    dot: false
+  }), op && React.createElement(ReferenceDot, {
+    x: op.Q,
+    y: +(eta * 100).toFixed(1),
+    r: 6,
+    fill: "#fbbf24",
+    stroke: "#fff",
+    strokeWidth: 2
+  })))), React.createElement("div", {
+    style: card
+  }, React.createElement("h3", {
+    style: htitle("#7dd3fc")
+  }, "\u2699\uFE0F \u904B\u8EE2\u6761\u4EF6"), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, React.createElement(Slider, {
+    label: "静揚程（高低差）",
+    value: staticHead,
+    min: 0,
+    max: Math.max(10, pumpHso - 1),
+    onChange: setStaticHead,
+    color: "#fb923c",
+    unit: "m",
+    sub: "吸込→吐出"
+  }), React.createElement(Slider, {
+    label: "吸込み揚程",
+    value: suctionLift,
+    min: 0,
+    max: 8,
+    step: 0.5,
+    onChange: setSuctionLift,
+    color: "#c084fc",
+    unit: "m",
+    sub: "ポンプ→液面"
+  })))), React.createElement("div", null, React.createElement("div", {
+    style: {
+      ...card,
+      border: "1px solid #1e40af"
+    }
+  }, React.createElement("h3", {
+    style: htitle("#60a5fa")
+  }, "\uD83D\uDD29 \u30DD\u30F3\u30D7\u7279\u6027\u306E\u8A2D\u5B9A\uFF08H-Q\u66F2\u7DDA\u5F62\u72B6\uFF09"), React.createElement("div", {
+    style: {
+      background: "#0f172a",
+      borderRadius: 6,
+      padding: "8px 12px",
+      marginBottom: 12,
+      display: "grid",
+      gridTemplateColumns: "repeat(5, 1fr)",
+      gap: 6,
+      textAlign: "center"
+    }
+  }, [{
+    label: "閉め切り揚程",
+    val: `${pumpHso}m`,
+    sub: "H@Q=0",
+    color: "#38bdf8"
+  }, {
+    label: "最大流量時揚程",
+    val: `${pumpHmax}m`,
+    sub: `H@Qmax`,
+    color: "#818cf8"
+  }, {
+    label: "最大流量",
+    val: `${pumpQmax}m³/h`,
+    sub: "Q@Hmin",
+    color: "#f87171"
+  }, {
+    label: "BEP流量",
+    val: `${pumpBepQ}m³/h`,
+    sub: "最高効率点",
+    color: "#4ade80"
+  }, {
+    label: "BEP揚程",
+    val: `${pumpHead(pumpBepQ).toFixed(1)}m`,
+    sub: "BEP時",
+    color: "#4ade80"
+  }].map((m, i) => React.createElement("div", {
+    key: i
+  }, React.createElement("div", {
+    style: {
+      fontSize: 9,
+      color: "#475569",
+      marginBottom: 1
+    }
+  }, m.label), React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: "bold",
+      color: m.color
+    }
+  }, m.val), React.createElement("div", {
+    style: {
+      fontSize: 9,
+      color: "#334155"
+    }
+  }, m.sub)))), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, React.createElement(Slider, {
+    label: "閉め切り揚程 Hso",
+    value: pumpHso,
+    min: 5,
+    max: 80,
+    onChange: v => {
+      setPumpHso(v);
+      if (staticHead >= v) setStaticHead(Math.max(0, v - 1));
+      if (pumpHmax >= v) setPumpHmax(Math.max(0, v - 1));
+    },
+    color: "#38bdf8",
+    unit: "m",
+    sub: "Q=0時の最大揚程"
+  }), React.createElement(Slider, {
+    label: "最大流量時揚程",
+    value: pumpHmax,
+    min: 0,
+    max: Math.max(1, pumpHso - 1),
+    onChange: setPumpHmax,
+    color: "#818cf8",
+    unit: "m",
+    sub: "Q=Qmax時の揚程"
+  }), React.createElement(Slider, {
+    label: "最大流量 Qmax",
+    value: pumpQmax,
+    min: 5,
+    max: 60,
+    onChange: setPumpQmax,
+    color: "#f87171",
+    unit: "m³/h",
+    sub: "最大流量"
+  }), React.createElement(Slider, {
+    label: "最高効率 ηmax",
+    value: etaMax,
+    min: 30,
+    max: 92,
+    onChange: setEtaMax,
+    color: "#fbbf24",
+    unit: "%",
+    sub: "BEPでの効率"
+  }), React.createElement(Slider, {
+    label: "最高効率流量 Qbep",
+    value: pumpBepQ,
+    min: 1,
+    max: Math.max(2, pumpQmax - 1),
+    step: 0.5,
+    onChange: setPumpBepQ,
+    color: "#4ade80",
+    unit: "m³/h",
+    sub: "効率ピークの流量"
+  })), React.createElement("div", {
+    style: {
+      marginTop: 10,
+      padding: "5px 10px",
+      background: "#0a1628",
+      borderRadius: 5,
+      fontFamily: "monospace",
+      fontSize: 11,
+      color: "#7dd3fc"
+    }
+  }, "H =", pumpHso, "\u2212", (pumpB / 3600 ** 2).toFixed(5), "\xD7 Q\xB2", React.createElement("span", {
+    style: {
+      color: "#475569",
+      marginLeft: 10
+    }
+  }, "(Q: m\xB3/h, H: m)")), React.createElement("h3", {
+    style: {
+      ...htitle("#c084fc"),
+      marginTop: 14
+    }
+  }, "\u26A0\uFE0F NPSHr\u8A2D\u5B9A\uFF083\u70B9\u5165\u529B\uFF09"), React.createElement("div", {
+    style: {
+      background: "#0f172a",
+      borderRadius: 6,
+      padding: "8px 12px",
+      marginBottom: 12,
+      display: "grid",
+      gridTemplateColumns: "repeat(3, 1fr)",
+      gap: 6,
+      textAlign: "center"
+    }
+  }, [{
+    label: "締め切り",
+    val: `${npshR0}m`,
+    sub: "Q=0",
+    color: "#c084fc"
+  }, {
+    label: "中間流量",
+    val: `${npshRmid}m`,
+    sub: `Q=${(pumpQmax / 2).toFixed(1)}m³/h`,
+    color: "#c084fc"
+  }, {
+    label: "最大流量",
+    val: `${npshRmax}m`,
+    sub: `Q=${pumpQmax}m³/h`,
+    color: "#c084fc"
+  }].map((m, i) => React.createElement("div", {
+    key: i
+  }, React.createElement("div", {
+    style: {
+      fontSize: 9,
+      color: "#475569",
+      marginBottom: 1
+    }
+  }, m.label), React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: "bold",
+      color: m.color
+    }
+  }, m.val), React.createElement("div", {
+    style: {
+      fontSize: 9,
+      color: "#334155"
+    }
+  }, m.sub)))), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr 1fr",
+      gap: 14
+    }
+  }, React.createElement(Slider, {
+    label: "NPSHr 締め切り",
+    value: npshR0,
+    min: 0,
+    max: 12,
+    step: 0.1,
+    onChange: setNpshR0,
+    color: "#c084fc",
+    unit: "m",
+    sub: "Q=0"
+  }), React.createElement(Slider, {
+    label: "NPSHr 中間",
+    value: npshRmid,
+    min: 0,
+    max: 12,
+    step: 0.1,
+    onChange: setNpshRmid,
+    color: "#c084fc",
+    unit: "m",
+    sub: `Q=${(pumpQmax / 2).toFixed(1)}`
+  }), React.createElement(Slider, {
+    label: "NPSHr 最大流量",
+    value: npshRmax,
+    min: 0,
+    max: 12,
+    step: 0.1,
+    onChange: setNpshRmax,
+    color: "#c084fc",
+    unit: "m",
+    sub: `Q=${pumpQmax}`
+  }))), React.createElement("div", {
+    style: card
+  }, React.createElement("h3", {
+    style: htitle("#7dd3fc")
+  }, "\uD83D\uDCC8 \u904B\u8EE2\u70B9\u30C7\u30FC\u30BF"), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(3, 1fr)",
+      gap: 6,
+      marginBottom: 8
+    }
+  }, [{
+    label: "流量 Q",
+    val: op ? `${op.Q}` : "—",
+    unit: "m³/h",
+    color: "#38bdf8"
+  }, {
+    label: "全揚程 H",
+    val: op ? `${op.H}` : "—",
+    unit: "m",
+    color: "#fb923c"
+  }, {
+    label: "流速 v",
+    val: op ? vel.toFixed(2) : "—",
+    unit: "m/s",
+    color: vel > 3 ? "#fbbf24" : "#4ade80"
+  }, {
+    label: "NPSHa",
+    val: npshA !== null ? `${npshA}` : "—",
+    unit: "m",
+    color: npshOk ? "#4ade80" : "#f87171"
+  }, {
+    label: "NPSHr",
+    val: npshR !== null ? `${npshR}` : "—",
+    unit: "m",
+    color: "#c084fc"
+  }, {
+    label: "効率 η",
+    val: op ? `${(eta * 100).toFixed(1)}` : "—",
+    unit: "%",
+    color: "#fbbf24"
+  }, {
+    label: "軸動力 P",
+    val: op ? `${power}` : "—",
+    unit: "kW",
+    color: "#f9a8d4"
+  }, {
+    label: "Re数",
+    val: op ? `${Math.round(Re / 1000)}k` : "—",
+    unit: "",
+    color: "#7dd3fc"
+  }, {
+    label: "流れ域",
+    val: Re > 4000 ? "乱流" : Re > 2300 ? "遷移" : op ? "層流" : "—",
+    unit: "",
+    color: Re > 4000 ? "#4ade80" : "#fbbf24"
+  }].map((m, i) => React.createElement("div", {
+    key: i,
+    style: mBox
+  }, React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      color: "#475569",
+      marginBottom: 2
+    }
+  }, m.label), React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: "bold",
+      color: m.color,
+      lineHeight: 1.2
+    }
+  }, m.val), React.createElement("div", {
+    style: {
+      fontSize: 9,
+      color: "#334155"
+    }
+  }, m.unit)))), op && npshA !== null && npshR !== null && React.createElement("div", null, React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 10,
+      color: "#64748b",
+      marginBottom: 3
+    }
+  }, React.createElement("span", null, "NPSH\u4F59\u88D5\u5EA6:", (npshA - npshR).toFixed(2), "m"), React.createElement("span", {
+    style: {
+      color: npshOk ? "#4ade80" : "#f87171"
+    }
+  }, npshOk ? "✓ 安全" : "✗ 危険")), React.createElement("div", {
+    style: {
+      background: "#0f172a",
+      borderRadius: 4,
+      height: 7
+    }
+  }, React.createElement("div", {
+    style: {
+      height: "100%",
+      borderRadius: 4,
+      background: npshOk ? "#22c55e" : "#ef4444",
+      width: `${Math.min(100, Math.max(0, npshA / (npshR + 2) * 100))}%`,
+      transition: "width 0.3s"
+    }
+  })))), React.createElement("div", {
+    style: card
+  }, React.createElement("h3", {
+    style: htitle("#7dd3fc")
+  }, "\uD83D\uDD27 \u914D\u7BA1\u90E8\u54C1\u30D1\u30EC\u30C3\u30C8", React.createElement("span", {
+    style: {
+      fontSize: 10,
+      color: "#475569",
+      fontWeight: "normal",
+      marginLeft: 6
+    }
+  }, "(\u30AF\u30EA\u30C3\u30AF\u3067\u8FFD\u52A0)")), [{
+    label: "直管",
+    items: FITTINGS.filter(f => f.cat === "pipe")
+  }, {
+    label: "エルボ・継手",
+    items: FITTINGS.filter(f => f.cat === "fitting")
+  }, {
+    label: "バルブ類",
+    items: FITTINGS.filter(f => f.cat === "valve")
+  }].map(group => React.createElement("div", {
+    key: group.label,
+    style: {
+      marginBottom: 8
+    }
+  }, React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "#475569",
+      marginBottom: 4,
+      borderBottom: "1px solid #1e3a5f",
+      paddingBottom: 3
+    }
+  }, group.label), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(3, 1fr)",
+      gap: 5
+    }
+  }, group.items.map(f => {
+    const col = getColors(f);
+    return React.createElement("button", {
+      key: f.id,
+      onClick: () => addComp(f.id),
+      style: {
+        background: col.bg,
+        border: `1px solid ${col.border}`,
+        borderRadius: 5,
+        padding: "6px 4px",
+        color: "#e2e8f0",
+        cursor: "pointer",
+        fontSize: 10,
+        textAlign: "center",
+        transition: "filter 0.15s"
+      },
+      onMouseEnter: e => e.currentTarget.style.filter = "brightness(1.35)",
+      onMouseLeave: e => e.currentTarget.style.filter = "brightness(1)"
+    }, React.createElement("div", {
+      style: {
+        fontSize: 15
+      }
+    }, f.icon), React.createElement("div", {
+      style: {
+        fontSize: 9.5,
+        margin: "2px 0 1px",
+        lineHeight: 1.3
+      }
+    }, f.name), React.createElement("div", {
+      style: {
+        fontSize: 9,
+        color: col.kLabel
+      }
+    }, f.cat === "pipe" ? `${f.length}m` : `K=${f.k}`));
+  }))))), React.createElement("div", {
+    style: card
+  }, React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 8
+    }
+  }, React.createElement("h3", {
+    style: {
+      ...htitle("#7dd3fc"),
+      margin: 0
+    }
+  }, "\uD83D\uDD29 \u914D\u7BA1\u69CB\u6210"), React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "center"
+    }
+  }, React.createElement("span", {
+    style: {
+      fontSize: 10,
+      color: "#475569"
+    }
+  }, "\u7BA1\u9577", sumL, "m | \u03A3K=", sumK.toFixed(1)), React.createElement("button", {
+    onClick: clearAll,
+    style: {
+      background: "transparent",
+      border: "1px solid #334155",
+      borderRadius: 4,
+      color: "#64748b",
+      padding: "2px 8px",
+      cursor: "pointer",
+      fontSize: 10
+    }
+  }, "\uD83D\uDDD1 \u5168\u524A\u9664"))), pipeline.length === 0 ? React.createElement("div", {
+    style: {
+      color: "#1e3a5f",
+      textAlign: "center",
+      padding: "16px 10px",
+      fontSize: 12,
+      border: "1px dashed #1e3a5f",
+      borderRadius: 6
+    }
+  }, "\u2191 \u30D1\u30EC\u30C3\u30C8\u304B\u3089\u90E8\u54C1\u3092\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044") : React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4,
+      flexWrap: "wrap"
+    }
+  }, React.createElement("div", {
+    style: {
+      background: "#0c2543",
+      border: "1px solid #3b82f6",
+      borderRadius: 5,
+      padding: "4px 8px",
+      fontSize: 10,
+      flexShrink: 0
+    }
+  }, "\uD83E\uDEA3 \u5438\u8FBC\u69FD"), React.createElement("span", {
+    style: {
+      color: "#334155"
+    }
+  }, "\u2192"), React.createElement("div", {
+    style: {
+      background: "#312e81",
+      border: "1px solid #818cf8",
+      borderRadius: 5,
+      padding: "4px 8px",
+      fontSize: 10,
+      flexShrink: 0,
+      boxShadow: canFlow ? "0 0 8px #818cf860" : "none"
+    }
+  }, "\uD83C\uDF00 \u30DD\u30F3\u30D7"), React.createElement("span", {
+    style: {
+      color: "#334155"
+    }
+  }, "\u2192"), pipeline.map((c, i) => {
+    const col = getColors(c);
+    return React.createElement("div", {
+      key: c.uid,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 4
+      }
+    }, React.createElement("button", {
+      onClick: () => removeComp(c.uid),
+      style: {
+        background: col.bg,
+        border: `1px solid ${col.border}`,
+        borderRadius: 5,
+        padding: "3px 7px",
+        color: "#e2e8f0",
+        cursor: "pointer",
+        fontSize: 10,
+        flexShrink: 0,
+        transition: "opacity 0.15s"
+      },
+      onMouseEnter: e => e.currentTarget.style.opacity = "0.6",
+      onMouseLeave: e => e.currentTarget.style.opacity = "1"
+    }, c.name, c.cat === "pipe" ? ` (${c.length}m)` : ` K=${c.k}`, React.createElement("span", {
+      style: {
+        marginLeft: 4,
+        color: "#64748b",
+        fontSize: 9
+      }
+    }, "\u2715")), i < pipeline.length - 1 && React.createElement("span", {
+      style: {
+        color: "#334155",
+        fontSize: 10
+      }
+    }, "\u2192"));
+  }), React.createElement("span", {
+    style: {
+      color: "#334155"
+    }
+  }, "\u2192"), React.createElement("div", {
+    style: {
+      background: "#0c2543",
+      border: "1px solid #3b82f6",
+      borderRadius: 5,
+      padding: "4px 8px",
+      fontSize: 10,
+      flexShrink: 0
+    }
+  }, "\uD83C\uDFED \u5410\u51FA\u69FD"))), React.createElement("p", {
+    style: {
+      margin: "6px 0 0",
+      fontSize: 9.5,
+      color: "#334155"
+    }
+  }, "\u203B \u5404\u90E8\u54C1\u30AF\u30EA\u30C3\u30AF\u3067\u500B\u5225\u524A\u9664")), pipeline.length > 0 && React.createElement("div", {
+    style: card
+  }, React.createElement("h3", {
+    style: htitle("#7dd3fc")
+  }, "\uD83D\uDCCA \u5727\u529B\u640D\u5931\u5185\u8A33"), (() => {
+    const pK = DARCY_F * sumL / PIPE_D;
+    const tK = sumK + pK;
+    const items = [{
+      label: `直管摩擦 (f·L/D)`,
+      k: pK
+    }, ...pipeline.filter(c => c.cat !== "pipe").map(c => ({
+      label: c.name,
+      k: c.k || 0
+    }))];
+    return items.map((item, i) => {
+      const ratio = tK > 0 ? item.k / tK : 0;
+      const h = op ? +(item.k / (2 * G * PIPE_A ** 2 * 3600 ** 2) * op.Q ** 2).toFixed(3) : null;
+      return React.createElement("div", {
+        key: i,
+        style: {
+          marginBottom: 6
+        }
+      }, React.createElement("div", {
+        style: {
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 11,
+          color: "#94a3b8",
+          marginBottom: 2
+        }
+      }, React.createElement("span", null, item.label), React.createElement("span", {
+        style: {
+          color: "#7dd3fc"
+        }
+      }, "K=", item.k.toFixed(2), h !== null ? ` → ${h}m` : "")), React.createElement("div", {
+        style: {
+          background: "#0f172a",
+          borderRadius: 3,
+          height: 6
+        }
+      }, React.createElement("div", {
+        style: {
+          height: "100%",
+          borderRadius: 3,
+          background: "#3b82f6",
+          width: `${(ratio * 100).toFixed(1)}%`,
+          transition: "width 0.3s"
+        }
+      })));
+    });
+  })()))), React.createElement("div", {
+    style: {
+      ...card,
+      marginTop: 0
+    }
+  }, React.createElement("h3", {
+    style: htitle("#7dd3fc")
+  }, "\uD83D\uDCDA \u5B66\u7FD2\u30DD\u30A4\u30F3\u30C8"), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)",
+      gap: 8,
+      fontSize: 11,
+      color: "#94a3b8",
+      lineHeight: 1.7
+    }
+  }, [{
+    c: "#38bdf8",
+    title: "🔵 H-Q曲線の形状",
+    body: "閉め切り揚程(Hso)と最大流量(Qmax)の2点で曲線が決まります。Hsoが高いほど急峻、Qmaxが大きいほど平坦な曲線になります。"
+  }, {
+    c: "#fb923c",
+    title: "🟠 システム曲線",
+    body: "静揚程＋配管抵抗(流量²に比例)の合計。バルブを絞ると曲線が急になり運転点が左へシフトします。"
+  }, {
+    c: "#facc15",
+    title: "🟡 運転点(OP)",
+    body: "ポンプ曲線とシステム曲線の交点。ここが実際の流量と揚程です。配管の変更でリアルタイムに動きます。"
+  }, {
+    c: "#4ade80",
+    title: "🟢 NPSHa",
+    body: "大気圧から蒸気圧・吸込損失を差し引いた値。吸込み揚程が大きいほど小さくなります。常にNPSHa>NPSHrが必要です。"
+  }, {
+    c: "#f87171",
+    title: "🔴 キャビテーション",
+    body: "NPSHa<NPSHrになると気泡が発生・崩壊してポンプ羽根車を壊食します。騒音・振動・揚程低下の原因に。"
+  }, {
+    c: "#fbbf24",
+    title: "⚡ 流速の目安",
+    body: "推奨0.5〜3m/s(吐出配管)。高流速は騒音・水撃の原因。管径を大きくするか流量を絞って改善します。"
+  }].map((item, i) => React.createElement("div", {
+    key: i,
+    style: {
+      background: "#0f172a",
+      borderRadius: 6,
+      padding: "10px 12px"
+    }
+  }, React.createElement("div", {
+    style: {
+      color: item.c,
+      fontWeight: "bold",
+      marginBottom: 4
+    }
+  }, item.title), item.body)))), React.createElement("div", {
+    style: {
+      textAlign: "center",
+      fontSize: 10,
+      color: "#1e3a5f",
+      marginTop: 8
+    }
+  }, "\u203B \u6559\u80B2\u76EE\u7684\u306E\u7C21\u7565\u30E2\u30C7\u30EB\u3067\u3059\u3002\u5B9F\u8A2D\u8A08\u306B\u306F\u30E1\u30FC\u30AB\u30FC\u30AB\u30BF\u30ED\u30B0\u30FB\u8A73\u7D30\u914D\u7BA1\u8A2D\u8A08\u3092\u3054\u4F7F\u7528\u304F\u3060\u3055\u3044\u3002\n\u3000 \u914D\u7BA1\u5185\u5F84 50A / \u6D41\u4F53: \u6C34 20\xB0C / Darcy\u6469\u64E6\u4FC2\u6570 f=0.022"));
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(PumpSimulator, null));
+      document.getElementById("loading").style.display = "none";
+    } catch(e) {
+      showError("起動エラー:\n" + e.message + "\n" + (e.stack||"").split("\n").slice(0,4).join("\n"));
+    }
+  </script>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function() {
+        navigator.serviceWorker.register("sw.js").catch(function(){});
+      });
+    }
+  </script>
+</body>
+</html>

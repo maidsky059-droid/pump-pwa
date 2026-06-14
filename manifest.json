@@ -1,0 +1,25 @@
+{
+  "name": "遠心ポンプ シミュレータ",
+  "short_name": "ポンプ学習",
+  "description": "遠心渦巻きポンプのH-Q曲線・NPSH・配管抵抗を学べる教育用シミュレータ",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
